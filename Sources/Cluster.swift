@@ -10,7 +10,8 @@ import CoreLocation
 import MapKit
 
 open class ClusterManager {
-    
+    private let dispatchQueue = DispatchQueue(label: "cluster", qos: .background, attributes: [], autoreleaseFrequency: .inherit, target: nil)
+    private var isComputingClustering = false
     var tree = QuadTree(rect: MKMapRectWorld)
     
     /**
@@ -105,13 +106,22 @@ open class ClusterManager {
      - Parameters:
         - mapView: The map view object to reload.
      */
+    
     open func reload(_ mapView: MKMapView, visibleMapRect: MKMapRect) {
+        UserDefaults.standard.setValue(false, forKey: "_UIConstraintBasedLayoutLogUnsatisfiable")
         let zoomScale = ZoomScale(mapView.bounds.width) / visibleMapRect.size.width
-        let (toAdd, toRemove) = clusteredAnnotations(mapView, zoomScale: zoomScale, visibleMapRect: visibleMapRect)
-        mapView.removeAnnotations(toRemove)
-        mapView.addAnnotations(toAdd)
-        visibleAnnotations.subtract(Set(toRemove as! [NSObject]))
-        visibleAnnotations.formUnion(Set(toAdd as! [NSObject]))
+        guard !isComputingClustering else { return }
+        self.isComputingClustering = true
+        self.dispatchQueue.async {
+            let (toAdd, toRemove) = self.clusteredAnnotations(mapView, zoomScale: zoomScale, visibleMapRect: visibleMapRect)
+            DispatchQueue.main.async {
+                mapView.removeAnnotations(toRemove)
+                mapView.addAnnotations(toAdd)
+                self.visibleAnnotations.subtract(Set(toRemove as! [NSObject]))
+                self.visibleAnnotations.formUnion(Set(toAdd as! [NSObject]))
+                self.isComputingClustering = false
+            }
+        }
     }
     
     func clusteredAnnotations(_ mapView: MKMapView, zoomScale: ZoomScale, visibleMapRect: MKMapRect) -> (toAdd: [MKAnnotation], toRemove: [MKAnnotation]) {
@@ -127,7 +137,12 @@ open class ClusterManager {
         let maxY = Int(floor(visibleMapRect.maxY * scaleFactor))
         
         var clusteredAnnotations = [MKAnnotation]()
-        
+        var visibleClusters = [CLLocationCoordinate2D: MKAnnotation]() // Used so we don't remove/re-add clusters that are already on the map
+        self.visibleAnnotations
+            .flatMap({ return $0 as? ClusterAnnotation })
+            .forEach {
+                visibleClusters[$0.coordinate] = $0
+        }
         for x in minX...maxX {
             for y in minY...maxY {
                 var mapRect = MKMapRect(x: Double(x) / scaleFactor, y: Double(y) / scaleFactor, width: 1 / scaleFactor, height: 1 / scaleFactor)
@@ -162,7 +177,7 @@ open class ClusterManager {
                         latitude: CLLocationDegrees(totalLatitude) / CLLocationDegrees(count),
                         longitude: CLLocationDegrees(totalLongitude) / CLLocationDegrees(count)
                     )
-                    let cluster = ClusterAnnotation()
+                    var cluster = (visibleClusters[coordinate] as? ClusterAnnotation) ?? ClusterAnnotation()
                     cluster.coordinate = coordinate
                     cluster.annotations = annotations
                     cluster.type = (annotations.first as? Annotation)?.type
@@ -173,7 +188,7 @@ open class ClusterManager {
             }
         }
         
-        let before = Set(visibleAnnotations)
+        let before = Set(self.visibleAnnotations)
         let after = Set(clusteredAnnotations as! [NSObject])
         
         var toRemove = before.subtracting(after)
@@ -186,5 +201,5 @@ open class ClusterManager {
         
         return (toAdd: Array(toAdd) as! [MKAnnotation], toRemove: Array(toRemove) as! [MKAnnotation])
     }
-    
 }
+
